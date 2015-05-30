@@ -131,6 +131,8 @@ Layer classes: embedding layers
 Layer classes: recurrent layers
 -------------------------------
 
+.. automodule:: lasagne.layers.recurrent
+
 .. autoclass:: CustomRecurrentLayer
     :members:
 
