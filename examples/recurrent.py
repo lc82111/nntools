@@ -166,4 +166,5 @@ def main(num_epochs=NUM_EPOCHS):
         pass
 
 if __name__ == '__main__':
+    #x, y, m = gen_data()
     main()
