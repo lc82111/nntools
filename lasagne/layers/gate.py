@@ -712,13 +712,13 @@ def main():
 
     # build PGP network and iter functions
     PGP_layers = build_PGP(seqs_shape, num_all_units, num_not_pred)
-    funcs = create_PGP_iter_functions(PGP_data, seqs_shape, num_all_units, 
+    PGP_funcs = create_PGP_iter_functions(PGP_data, seqs_shape, num_all_units, 
                                PGP_layers, num_not_pred, momentum=0.9)
 
 
     # pretrain using GAE model
     # train vec
-    vec_layers = main_GAE(GAE_data, num_epochs=1, batch_size=100, 
+    vec_layers = main_GAE(GAE_data, num_epochs=10, batch_size=100, 
                           num_fac=num_all_units['v_f'], num_maps=num_all_units['v_m'], 
                           learning_rate=0.01, noise=0.3, pretrain=False)
 
@@ -726,8 +726,9 @@ def main():
     PGP_layers['v'].W_x.set_value(vec_layers['m'].W_x.get_value()*utils.floatX(0.5))
     PGP_layers['v'].W_y.set_value(vec_layers['m'].W_y.get_value()*utils.floatX(0.5))
     PGP_layers['v'].W_m.set_value(vec_layers['x_r'].W_x.get_value().T)
-    # propagateing traing data through vec layer of PGP network
-    v_o = funcs['vec_out'](PGP_data['X_train_np'])
+
+    # propagateing traing data through vec layer of PGP network to get vec_output
+    v_o = PGP_funcs['vec_out'](PGP_data['X_train_np'])
 
     # prepare v_o data for acc pretrain
     v_o = v_o.reshape(v_o.shape[0], v_o.shape[1]*v_o.shape[2])
@@ -748,10 +749,33 @@ def main():
     # train acc 
     acc_layers = main_GAE(acc_data, num_epochs=10, batch_size=100, 
                           num_fac=num_all_units['a_f'], num_maps=num_all_units['a_m'], 
-                          learning_rate=0.01, noise=0.3, pretrain=True)
-    acc_layers[0]
+                         learning_rate=0.01, noise=0.3, pretrain=True)
+
+    # set PGP acc layer weight 
+    PGP_layers['a'].W_x.set_value(acc_layers['m'].W_x.get_value()*utils.floatX(0.5))
+    PGP_layers['a'].W_y.set_value(acc_layers['m'].W_y.get_value()*utils.floatX(0.5))
+    PGP_layers['a'].W_m.set_value(acc_layers['x_r'].W_x.get_value().T)
+
     # train PGP model
-    main_PGP(PGP_data)
+    print("Starting training PGP ...")
+    now = time.time()
+    num_epochs = 500
+    try:
+        for epoch in train(PGP_funcs, PGP_data, learning_rate=0.01):
+            print("Epoch {} of {} took {:.3f}s".format(
+                epoch['number'], num_epochs, time.time() - now))
+            now = time.time()
+            print("  training loss:\t\t{:.6f}".format(epoch['train_loss']))
+            print("  validation loss:\t\t{:.6f}".format(epoch['valid_loss']))
+            #print("  validation accuracy:\t\t{:.2f} %".format( epoch['valid_accuracy'] * 100))
+           # if epoch['number'] % 10 == 0:
+           #     learning_rate -= 0.005
+
+            if epoch['number'] >= num_epochs:
+                break
+
+    except KeyboardInterrupt:
+        pass
 
 if __name__ == '__main__':
     main()
