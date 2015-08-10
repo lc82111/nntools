@@ -252,18 +252,8 @@ class PGPLayer(Layer):
         # (n_batch, n_time_steps, n_features)---->(n_time_steps, n_batch, n_features)
         input = input.dimshuffle(1, 0, 2)
 
-        # Prepare inputdata: stack adjenct frames horizontally
-        _input=[]
-        for i in range(self.input_shape[1]-1):
-            _input.append(T.concatenate([input[i], input[i+1]], 1))
-        input_xy = T.as_tensor_variable(_input)    
-                
         # Create single recurrent computation step function
-        def step(input_xy_n, *args):
-            # slice x y from input_xy
-            input_x_n = input_xy_n[:,:self.frame_dim]
-            input_y_n = input_xy_n[:,self.frame_dim:]
-
+        def step(input_x_n,input_y_n, *args):
             # computer maps units
             maps = helper.get_output(self.l_m, {self.l_x_i:input_x_n, self.l_y_i:input_y_n})
 
@@ -277,10 +267,10 @@ class PGPLayer(Layer):
         # We will always pass the hidden-to-hidden layer params to step
         non_seqs = helper.get_all_params(self.l_m)
       
-        # Scan op iterates over first dimension of input and repeatedly applies the step function
+        # Scan op iterates over first dimension of input, the using of taps mk scan looks forward one timestep
         maps_out = theano.scan(
             fn=step,
-            sequences=input_xy,
+            sequences=dict(input=input, taps=[-1,-0]),
             non_sequences=non_seqs,
             strict=True)[0]
 
@@ -441,9 +431,10 @@ def create_PGP_iter_functions( dataset, seqs_shape, num_all_units, layers, num_n
 
     # form an theano input var X and set test value for debug
     X_batch = T.tensor3('X_batch')
-    X_batch.tag.test_value = np.random.randn( 400, 16, 10).astype(np.float32)
+    X_batch.tag.test_value = np.random.randn(400, 16, 10).astype(np.float32)
     X = T.tensor3('X')
     X.tag.test_value = np.random.randn(50000, 16, 10).astype(np.float32)
+
     # get output for X
     X_batch_r  = helper.get_output(layers['i_r'], X_batch, deterministic=False)
     X_batch_r_t= helper.get_output(layers['i_r'], X_batch, deterministic=True)
@@ -730,6 +721,7 @@ def main():
     vec_layers = main_GAE(GAE_data, num_epochs=1, batch_size=100, 
                           num_fac=num_all_units['v_f'], num_maps=num_all_units['v_m'], 
                           learning_rate=0.01, noise=0.3, pretrain=False)
+
     # set PGP vec layer weight 
     PGP_layers['v'].W_x.set_value(vec_layers['m'].W_x.get_value()*utils.floatX(0.5))
     PGP_layers['v'].W_y.set_value(vec_layers['m'].W_y.get_value()*utils.floatX(0.5))
@@ -752,19 +744,21 @@ def main():
                     X_train=theano.shared(utils.floatX(X_v_o)),
                     Y_train=theano.shared(utils.floatX(Y_v_o)),
                     ) 
+
     # train acc 
     acc_layers = main_GAE(acc_data, num_epochs=10, batch_size=100, 
                           num_fac=num_all_units['a_f'], num_maps=num_all_units['a_m'], 
                           learning_rate=0.01, noise=0.3, pretrain=True)
-
+    acc_layers[0]
     # train PGP model
     main_PGP(PGP_data)
 
-###########
-
 if __name__ == '__main__':
     main()
-
+    
+##########
+# Below are dropped
+#########
 class GateTriangleLayer(ElemwiseMergeLayer):
     def __init__(self, incomings, num_units, W=init.GlorotUniform(), b=init.Constant(0.), nonlinearity=nonlinearities.sigmoid, **kwargs):
         # incoming layers check
@@ -812,4 +806,90 @@ class TransposedGateTriangleLayer(ElemwiseMergeLayer):
         if any(shape != input_shapes[0] for shape in input_shapes):
             raise ValueError("Mismatch: not all input shapes are the same")
         return (input_shapes[0][0], self.num_units)
+
+class PGPLayer_old_copyXY(Layer):
+    """
+    expect input have shape (batch_size, seq_len, frame_dim)
+    """
+    def __init__(self, incoming,
+                     num_factors,
+                     num_maps,
+                     W_x=init.GlorotUniform(), 
+                     W_y=init.GlorotUniform(),
+                     W_m=init.GlorotUniform(),
+                     b_m=init.Constant(0.),
+                     nonlinearity=nonlinearities.sigmoid,
+                     grad_clipping=False,
+                     **kwargs):
+        super(PGPLayer, self).__init__(incoming, **kwargs)
+
+        if nonlinearity is None:
+            self.nonlinearity = nonlinearities.identity
+        else:
+            self.nonlinearity = nonlinearity
+        self.grad_clipping = grad_clipping
+        self.num_factors = num_factors
+        self.num_maps = num_maps
+        # (batch_size, seq_len, frame_dim)
+        self.batch_size, self.seq_len, self.frame_dim = self.input_shape
+
+        # init FactorGateLayer instance
+        self.l_x_i = InputLayer(shape=(self.batch_size, self.frame_dim), name='l_x_i')
+        self.l_y_i = InputLayer(shape=(self.batch_size, self.frame_dim), name='l_y_i')
+        self.l_m   = FactorGateLayer([self.l_x_i, self.l_y_i], num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, name='FactorGateLayer_l_m')
+
+        # Make child layer parameters intuitively accessible
+        self.W_x=self.l_m.W_x; self.W_y=self.l_m.W_y; self.W_m=self.l_m.W_m; self.b_m=self.l_m.b_m
+
+    def get_output_for(self, input, **kwargs):
+        # (n_batch, n_time_steps, n_features)---->(n_time_steps, n_batch, n_features)
+        input = input.dimshuffle(1, 0, 2)
+
+        # Prepare inputdata: stack adjenct frames horizontally
+        _input=[]
+        for i in range(self.input_shape[1]-1):
+            _input.append(T.concatenate([input[i], input[i+1]], 1))
+        input_xy = T.as_tensor_variable(_input)    
+                
+        # Create single recurrent computation step function
+        def step(input_xy_n, *args):
+            # slice x y from input_xy
+            input_x_n = input_xy_n[:,:self.frame_dim]
+            input_y_n = input_xy_n[:,self.frame_dim:]
+
+            # computer maps units
+            maps = helper.get_output(self.l_m, {self.l_x_i:input_x_n, self.l_y_i:input_y_n})
+
+            # Clip gradients
+            if self.grad_clipping is not False:
+                maps = theano.gradient.grad_clip(
+                    maps, -self.grad_clipping, self.grad_clipping)
+
+            return self.nonlinearity(maps)
+
+        # We will always pass the hidden-to-hidden layer params to step
+        non_seqs = helper.get_all_params(self.l_m)
+      
+        # Scan op iterates over first dimension of input and repeatedly applies the step function
+        maps_out = theano.scan(
+            fn=step,
+            sequences=input_xy,
+            non_sequences=non_seqs,
+            strict=True)[0]
+
+        # dimshuffle back to (n_batch, n_time_steps, n_features))
+        maps_out = maps_out.dimshuffle(1, 0, 2)
+
+        return maps_out
+
+    def get_output_shape_for(self, input_shape):
+        # mapping units have a number less than input units number
+        return input_shape[0], input_shape[1]-1, self.num_maps
+
+    def get_params(self, **tags):
+        # Get all parameters from this layer, the master layer
+        params = super(PGPLayer, self).get_params(**tags)
+        # Combine with all parameters from the child layers
+        params += helper.get_all_params(self.l_m, **tags)
+        return params
 
