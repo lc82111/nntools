@@ -230,10 +230,7 @@ class PGPLayer(Layer):
                      **kwargs):
         super(PGPLayer, self).__init__(incoming, **kwargs)
 
-        if nonlinearity is None:
-            self.nonlinearity = nonlinearities.identity
-        else:
-            self.nonlinearity = nonlinearity
+        self.nonlinearity = (nonlinearities.identity if nonlinearity is None else nonlinearity)
         self.grad_clipping = grad_clipping
         self.num_factors = num_factors
         self.num_maps = num_maps
@@ -343,7 +340,7 @@ class PGPRLayer(MergeLayer):
         # init FactorGateLayer instance
         self.l_a_i = InputLayer(shape=(self.batch_size, self.frame_dim_a), name='l_a_i')
         self.l_jp_i = InputLayer(shape=(self.batch_size, self.frame_dim_jp), name='l_jp_i')
-        self.l_m   = FactorGateLayer([self.l_a_i, self.l_jp_i], num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m)
+        self.l_m   = FactorGateLayer([self.l_a_i, self.l_jp_i], num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, nonlinearity=self.nonlinearity, name='PGPRLayer l_m')
 
     def get_output_for(self, inputs, **kwargs):
         #inputs: l_a:(batch, time, dim) l_jp:(batch, time, dim)
@@ -371,7 +368,7 @@ class PGPRLayer(MergeLayer):
                 maps = theano.gradient.grad_clip(
                     maps, -self.grad_clipping, self.grad_clipping)
 
-            return self.nonlinearity(maps)
+            return maps
 
         # The l_m params are unchange during scan
         # non_seqs = helper.get_all_params(self.l_m) is not enough to get all params         
