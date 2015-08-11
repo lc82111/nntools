@@ -243,7 +243,7 @@ class PGPLayer(Layer):
         # init FactorGateLayer instance
         self.l_x_i = InputLayer(shape=(self.batch_size, self.frame_dim), name='l_x_i')
         self.l_y_i = InputLayer(shape=(self.batch_size, self.frame_dim), name='l_y_i')
-        self.l_m   = FactorGateLayer([self.l_x_i, self.l_y_i], num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, name='FactorGateLayer_l_m')
+        self.l_m   = FactorGateLayer([self.l_x_i, self.l_y_i], num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, nonlinearity=self.nonlinearity, name='FactorGateLayer_l_m')
 
         # Make child layer parameters intuitively accessible
         self.W_x=self.l_m.W_x; self.W_y=self.l_m.W_y; self.W_m=self.l_m.W_m; self.b_m=self.l_m.b_m
@@ -262,7 +262,7 @@ class PGPLayer(Layer):
                 maps = theano.gradient.grad_clip(
                     maps, -self.grad_clipping, self.grad_clipping)
 
-            return self.nonlinearity(maps)
+            return maps
 
         # We will always pass the hidden-to-hidden layer params to step
         non_seqs = helper.get_all_params(self.l_m)
@@ -780,11 +780,93 @@ def main():
     except KeyboardInterrupt:
         pass
 
-if __name__ == '__main__':
-    main()
+
+#########
+# Test 
+########
+def sigmoid(z):
+    return 1.0/(1.0+np.exp(-z))
+
+def test_PGPLayer():
+    # build PGP network and functions
+    # (batchsize, timsteps, framedim)
+    l_i = InputLayer(shape=(1,4,3)) 
+    l_v = PGPLayer(l_i, num_factors=4, num_maps=2)
+
+    X = T.tensor3('X')
+    input=np.arange(4*3).astype(np.float32)
+    input=input.reshape(1,4,3)
+
+    vec_out = helper.get_output(l_v, X)
+    vec_out_f = theano.function([X], vec_out)
+    # propagateing traing data through vec layer of PGP network to get vec_output
+    o = vec_out_f(input)
+
+    # computer control group
+
+    # get PGP vec layer weight 
+    W_x = l_v.W_x.get_value()
+    W_y = l_v.W_y.get_value()
+    W_m = l_v.W_m.get_value()
+    b_m = l_v.b_m.get_value()
+
+    i0 = input[:,0,:]
+    i1 = input[:,1,:]
+    i2 = input[:,2,:]
+    i3 = input[:,3,:]
     
+    f0x = np.dot(i0,W_x)
+    f1y = np.dot(i1,W_y)
+    f1x = np.dot(i1,W_x)
+    f2y = np.dot(i2,W_y)
+    f2x = np.dot(i2,W_x)
+    f3y = np.dot(i3,W_y)
+
+    o_control_0 = sigmoid(np.dot(f0x*f1y,W_m)+b_m)
+    o_control_1 = sigmoid(np.dot(f1x*f2y,W_m)+b_m)
+    o_control_2 = sigmoid(np.dot(f2x*f3y,W_m)+b_m)
+    pass
+
+def test_FactorGateLayer():
+    """
+    test pass!
+    """
+    # build network and functions
+    # (batchsize,framedim)
+    l_x_i = InputLayer(shape=(1,10)) 
+    l_y_i = InputLayer(shape=(1,10))
+    l_m = FactorGateLayer([l_x_i,l_y_i], num_factors=5, num_maps=6)
+
+    X = T.matrix('X')
+    Y = T.matrix('Y')
+    X_value = np.arange(10).astype(np.float32).reshape(1,10)
+    Y_value = X_value+1
+
+    maps_out = helper.get_output(l_m, {l_x_i:X, l_y_i:Y})
+    maps_out_f = theano.function([X,Y], maps_out)
+    # propagateing traing data through vec layer of PGP network to get vec_output
+    o = maps_out_f(X_value,Y_value)
+
+    # get factor gate layer weight 
+    W_x = l_m.W_x.get_value()
+    W_y = l_m.W_y.get_value()
+    W_m = l_m.W_m.get_value()
+    b_m = l_m.b_m.get_value()
+
+    # control group
+    fx = np.dot(X_value, W_x)
+    fy = np.dot(Y_value, W_y)
+    o_control = sigmoid(np.dot(fx*fy,W_m)+b_m)
+    pass
+
+
+if __name__ == '__main__':
+    test_PGPLayer()
+    main()
+
+
 ##########
-# Below are dropped
+# Below codes are obsolete 
 #########
 class GateTriangleLayer(ElemwiseMergeLayer):
     def __init__(self, incomings, num_units, W=init.GlorotUniform(), b=init.Constant(0.), nonlinearity=nonlinearities.sigmoid, **kwargs):
@@ -892,7 +974,7 @@ class PGPLayer_old_copyXY(Layer):
                 maps = theano.gradient.grad_clip(
                     maps, -self.grad_clipping, self.grad_clipping)
 
-            return self.nonlinearity(maps)
+            return maps
 
         # We will always pass the hidden-to-hidden layer params to step
         non_seqs = helper.get_all_params(self.l_m)
