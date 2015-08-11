@@ -142,8 +142,8 @@ def train(iter_funcs, dataset, learning_rate, batch_size, pretrain):
                 batch_valid_losses.append(batch_valid_loss)
                 #batch_valid_accuracies.append(batch_valid_accuracy)
 
-                avg_valid_loss = np.mean(batch_valid_losses)
-                #avg_valid_accuracy = np.mean(batch_valid_accuracies)
+            avg_valid_loss = np.mean(batch_valid_losses)
+            #avg_valid_accuracy = np.mean(batch_valid_accuracies)
         else:
             avg_valid_loss=None
 
@@ -405,7 +405,7 @@ class PGPRLayer(MergeLayer):
         params += helper.get_all_params(self.l_m, **tags)
         return params
 
-def build_PGP(seqs_shape, num_all_units, num_not_pred, noise=0.1):
+def build_PGP(seqs_shape, num_all_units, num_not_pred, noise):
     # Forward computer mapping units 
     l_i = InputLayer(shape=seqs_shape) 
     l_n = GaussianNoiseLayer(l_i, sigma=noise) 
@@ -565,7 +565,7 @@ def main_PGP(dataset):
 
 ###################
 #GAE BEGIN
-##################
+################## 
 def build_GAE(frames_shapes, num_fac, num_maps, noise=0.3):
     frame_dim = frames_shapes[1]
     #l_x_i = InputLayer(frames_shapes, name='l_x_i')
@@ -706,62 +706,65 @@ def main():
     GAE_data, PGP_data = make_sinwave()
 
     # (batchsize, timsteps, framedim)
-    seqs_shape = (500, PGP_data['timesteps'], PGP_data['frame_dim']) 
+    batch_size=400
+    seqs_shape = (batch_size, PGP_data['timesteps'], PGP_data['frame_dim']) 
     num_all_units= dict(vis=16, v_f=200,v_m=100,a_f=100,a_m=50,j_f=10,j_m=10,j_rnn_h_units=10)
     num_not_pred = 4 # vision frames reserved for infer remaining frames.
 
     # build PGP network and iter functions
-    PGP_layers = build_PGP(seqs_shape, num_all_units, num_not_pred)
+    PGP_layers = build_PGP(seqs_shape, num_all_units, num_not_pred, noise=0)
     PGP_funcs = create_PGP_iter_functions(PGP_data, seqs_shape, num_all_units, 
                                PGP_layers, num_not_pred, momentum=0.9)
 
+    PRETRAIN = True 
+    if PRETRAIN:
+        # pretrain using GAE model
+        # train vec
+        vec_layers = main_GAE(GAE_data, num_epochs=3, batch_size=100, 
+                              num_fac=num_all_units['v_f'], num_maps=num_all_units['v_m'], 
+                              learning_rate=0.01, noise=0.3, pretrain=False)
 
-    # pretrain using GAE model
-    # train vec
-    vec_layers = main_GAE(GAE_data, num_epochs=10, batch_size=100, 
-                          num_fac=num_all_units['v_f'], num_maps=num_all_units['v_m'], 
-                          learning_rate=0.01, noise=0.3, pretrain=False)
+        # set PGP vec layer weight 
+        PGP_layers['v'].W_x.set_value(vec_layers['m'].W_x.get_value()*utils.floatX(0.5))
+        PGP_layers['v'].W_y.set_value(vec_layers['m'].W_y.get_value()*utils.floatX(0.5))
+        PGP_layers['v'].W_m.set_value(vec_layers['x_r'].W_x.get_value().T)
+        PGP_layers['v'].b_m.set_value(vec_layers['m'].b_m.get_value())
 
-    # set PGP vec layer weight 
-    PGP_layers['v'].W_x.set_value(vec_layers['m'].W_x.get_value()*utils.floatX(0.5))
-    PGP_layers['v'].W_y.set_value(vec_layers['m'].W_y.get_value()*utils.floatX(0.5))
-    PGP_layers['v'].W_m.set_value(vec_layers['x_r'].W_x.get_value().T)
+        # propagateing traing data through vec layer of PGP network to get vec_output
+        v_o = PGP_funcs['vec_out'](PGP_data['X_train_np'])
 
-    # propagateing traing data through vec layer of PGP network to get vec_output
-    v_o = PGP_funcs['vec_out'](PGP_data['X_train_np'])
+        # prepare v_o data for acc pretrain
+        frame_dim = v_o.shape[2] # 100
+        v_o = v_o.reshape(v_o.shape[0], v_o.shape[1]*v_o.shape[2])
+        seq_len=v_o.shape[1] # timesteps 15 * framedim 100 
+        v_o = np.concatenate([v_o[i, 2*j*frame_dim:2*(j+1)*frame_dim][None,:] for j in range(seq_len/(frame_dim*2)) for i in range(PGP_data['num_train'])],0)
+        v_o = v_o[np.random.permutation(v_o.shape[0])]
+        X_v_o = v_o[:, :frame_dim]
+        Y_v_o = v_o[:, frame_dim:]
+        acc_data =  dict(
+                        num_train=X_v_o.shape[0],
+                        timesteps=2,
+                        frame_dim=X_v_o.shape[1],
+                        X_train=theano.shared(utils.floatX(X_v_o)),
+                        Y_train=theano.shared(utils.floatX(Y_v_o)),
+                        ) 
+        # train acc 
+        acc_layers = main_GAE(acc_data, num_epochs=3, batch_size=100, 
+                              num_fac=num_all_units['a_f'], num_maps=num_all_units['a_m'], 
+                             learning_rate=0.0005, noise=0.3, pretrain=True)
 
-    # prepare v_o data for acc pretrain
-    v_o = v_o.reshape(v_o.shape[0], v_o.shape[1]*v_o.shape[2])
-    seq_len=PGP_data['frame_dim']*(PGP_data['timesteps'] -1) # 10*(16-1)
-    frame_dim=PGP_data['frame_dim']
-    v_o = np.concatenate([v_o[i, 2*j*frame_dim:2*(j+1)*frame_dim][None,:] for j in range(seq_len/(frame_dim*2)) for i in range(PGP_data['num_train'])],0)
-    v_o = v_o[np.random.permutation(v_o.shape[0])]
-    X_v_o = v_o[:, :frame_dim]
-    Y_v_o = v_o[:, frame_dim:]
-    acc_data =  dict(
-                    num_train=X_v_o.shape[0],
-                    timesteps=2,
-                    frame_dim=X_v_o.shape[1],
-                    X_train=theano.shared(utils.floatX(X_v_o)),
-                    Y_train=theano.shared(utils.floatX(Y_v_o)),
-                    ) 
-
-    # train acc 
-    acc_layers = main_GAE(acc_data, num_epochs=10, batch_size=100, 
-                          num_fac=num_all_units['a_f'], num_maps=num_all_units['a_m'], 
-                         learning_rate=0.01, noise=0.3, pretrain=True)
-
-    # set PGP acc layer weight 
-    PGP_layers['a'].W_x.set_value(acc_layers['m'].W_x.get_value()*utils.floatX(0.5))
-    PGP_layers['a'].W_y.set_value(acc_layers['m'].W_y.get_value()*utils.floatX(0.5))
-    PGP_layers['a'].W_m.set_value(acc_layers['x_r'].W_x.get_value().T)
+        # set PGP acc layer weight 
+        PGP_layers['a'].W_x.set_value(acc_layers['m'].W_x.get_value())
+        PGP_layers['a'].W_y.set_value(acc_layers['m'].W_y.get_value())
+        PGP_layers['a'].W_m.set_value(acc_layers['x_r'].W_x.get_value().T)
+        PGP_layers['a'].b_m.set_value(acc_layers['m'].b_m.get_value())
 
     # train PGP model
     print("Starting training PGP ...")
     now = time.time()
     num_epochs = 500
     try:
-        for epoch in train(PGP_funcs, PGP_data, learning_rate=0.01):
+        for epoch in train(PGP_funcs, PGP_data, learning_rate=0.001,batch_size=batch_size, pretrain=False):
             print("Epoch {} of {} took {:.3f}s".format(
                 epoch['number'], num_epochs, time.time() - now))
             now = time.time()
