@@ -3,6 +3,7 @@ import sys
 sys.path.insert(0,'/home/congliu/codes/third_part/nntools/')
 import itertools
 import time
+#import matplotlib.pyplot as plt
 import numpy as np
 import theano
 import theano.tensor as T
@@ -12,7 +13,7 @@ from lasagne.updates import nesterov_momentum
 from lasagne.objectives import squared_error
 from lasagne import init 
 from lasagne import utils 
-from lasagne.layers import Layer, MergeLayer, ElemwiseMergeLayer, InputLayer, DropoutLayer, helper, GaussianNoiseLayer
+from lasagne.layers import Layer, MergeLayer, ElemwiseMergeLayer, InputLayer, DropoutLayer, helper, GaussianNoiseLayer, SliceLayer
 import lasagne
 
 #from .. import nonlinearities
@@ -238,9 +239,9 @@ class PGPLayer(Layer):
         self.batch_size, self.seq_len, self.frame_dim = self.input_shape
 
         # init FactorGateLayer instance
-        self.l_x_i = InputLayer(shape=(self.batch_size, self.frame_dim), name='l_x_i')
-        self.l_y_i = InputLayer(shape=(self.batch_size, self.frame_dim), name='l_y_i')
-        self.l_m   = FactorGateLayer([self.l_x_i, self.l_y_i], num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, nonlinearity=self.nonlinearity, name='FactorGateLayer_l_m')
+        self.l_x_i = InputLayer(shape=(self.batch_size, self.frame_dim), name='PGPLayer l_x_i')
+        self.l_y_i = InputLayer(shape=(self.batch_size, self.frame_dim), name='PGPLayer l_y_i')
+        self.l_m   = FactorGateLayer([self.l_x_i, self.l_y_i], num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, nonlinearity=self.nonlinearity, name='PGPLayer l_m')
 
         # Make child layer parameters intuitively accessible
         self.W_x=self.l_m.W_x; self.W_y=self.l_m.W_y; self.W_m=self.l_m.W_m; self.b_m=self.l_m.b_m
@@ -367,8 +368,8 @@ class PGPRLayer(MergeLayer):
         b_m = (l_a.b_m if b_m_tiled else init.Constant(0.))
 
         # init FactorGateLayer instance
-        self.l_a_i = InputLayer(shape=(self.batch_size, self.frame_dim_a), name='l_a_i')
-        self.l_jp_i = InputLayer(shape=(self.batch_size, self.frame_dim_jp), name='l_jp_i')
+        self.l_a_i = InputLayer(shape=(self.batch_size, self.frame_dim_a), name='PGPRLayer l_a_i')
+        self.l_jp_i = InputLayer(shape=(self.batch_size, self.frame_dim_jp), name='PGPRLayer l_jp_i')
         self.l_m   = FactorGateLayer([self.l_a_i, self.l_jp_i], num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, nonlinearity=self.nonlinearity, name='PGPRLayer l_m')
 
     def get_output_for(self, inputs, **kwargs):
@@ -445,11 +446,23 @@ def build_PGP(seqs_shape, num_all_units, num_not_pred, noise):
     #l_slice=SliceLayer(l_j, indices=slice(1,None), axis=1)
     l_j_p = JerkLayer(l_j, name='post-jerk layer')
     # reconstruct a, v and vis
-    l_a_r = PGPRLayer([l_a,l_j_p], num_not_pred=num_not_pred-2, b_m_tiled=True,  weight_tiled_layer=l_j, mixing=l_j_p.autonomy) 
-    l_v_r = PGPRLayer([l_v,l_a_r], num_not_pred=num_not_pred-1, b_m_tiled=True,  weight_tiled_layer=l_a, mixing=l_j_p.autonomy)
-    l_i_r = PGPRLayer([l_i,l_v_r], num_not_pred=num_not_pred, b_m_tiled=False, weight_tiled_layer=l_v, mixing=l_j_p.autonomy)
+    l_a_r = PGPRLayer([l_a,l_j_p], num_not_pred=num_not_pred-2, b_m_tiled=True,  weight_tiled_layer=l_j, mixing=l_j_p.autonomy, name='acc reconstr layer') 
+    l_v_r = PGPRLayer([l_v,l_a_r], num_not_pred=num_not_pred-1, b_m_tiled=True,  weight_tiled_layer=l_a, mixing=l_j_p.autonomy, name='vec reconstr layer')
+    l_i_r = PGPRLayer([l_i,l_v_r], num_not_pred=num_not_pred, b_m_tiled=False, weight_tiled_layer=l_v, mixing=False, name='vis reconstr layer')
 
     return dict(v=l_v, a=l_a, j=l_j, i_r=l_i_r)
+
+def build_PGP2(seqs_shape, num_all_units, num_not_pred, noise):
+    # Forward computer mapping units 
+    l_i = InputLayer(shape=seqs_shape) 
+    #l_n = GaussianNoiseLayer(l_i, sigma=noise) 
+    l_v = PGPLayer(l_i, num_factors=num_all_units['v_f'], num_maps=num_all_units['v_m'], name='vec layer')
+    l_vp= JerkLayer(l_v, name='post vec layer')
+    #l_s =SliceLayer(l_v, indices=slice(1,None), axis=1)
+    # reconstruct a, v and vis
+    l_i_r = PGPRLayer([l_i,l_vp], num_not_pred=num_not_pred, b_m_tiled=False, weight_tiled_layer=l_v, mixing=False, name='vis reconstr layer')
+
+    return dict(v=l_v, i_r=l_i_r)
 
 def create_PGP_iter_functions( dataset, seqs_shape, num_all_units, layers, num_not_pred, momentum=0.9):
     """Create functions for training, validation and testing to iterate one
@@ -466,7 +479,7 @@ def create_PGP_iter_functions( dataset, seqs_shape, num_all_units, layers, num_n
     # get output for X
     X_batch_r  = helper.get_output(layers['i_r'], X_batch, deterministic=False)
     X_batch_r_t= helper.get_output(layers['i_r'], X_batch, deterministic=True)
-    v_out = helper.get_output(layers['v'], X, deterministic=True)
+    #i_r = helper.get_output(layers['i_r'], X, deterministic=True)
 
     # loss
     loss_train = squared_error(X_batch_r,   X_batch[:,num_not_pred:,:]).sum(axis=2).mean(1).mean(0)
@@ -515,15 +528,15 @@ def create_PGP_iter_functions( dataset, seqs_shape, num_all_units, layers, num_n
         },
     )
 
-    vec_out = theano.function(
-        [X], v_out,
-    )
+       # i_r_fun = theano.function(
+       #     [X], i_r,
+       # )
 
     return dict(
         train=iter_train,
         valid=iter_valid,
         test=iter_test,
-        vec_out=vec_out,
+        #vis_reconstruc=i_r_fun, 
     )
 
     ## prediction
@@ -734,13 +747,15 @@ def main():
     GAE_data, PGP_data = make_sinwave()
 
     # (batchsize, timsteps, framedim)
-    batch_size=400
-    seqs_shape = (batch_size, PGP_data['timesteps'], PGP_data['frame_dim']) 
+    num_train=PGP_data['num_train']; batch_size=400
+    timesteps=PGP_data['timesteps']; framedim=PGP_data['frame_dim'] 
+    seqs_shape = (batch_size, timesteps, framedim)
     num_all_units= dict(vis=16, v_f=200,v_m=100,a_f=100,a_m=50,j_f=10,j_m=10,j_rnn_h_units=10)
-    num_not_pred = 4 # vision frames reserved for infer remaining frames.
+    # TODO 4 or 2 
+    num_not_pred = 2 # vision frames reserved for infer remaining frames.
 
     # build PGP network and iter functions
-    PGP_layers = build_PGP(seqs_shape, num_all_units, num_not_pred, noise=0.3)
+    PGP_layers = build_PGP2(seqs_shape, num_all_units, num_not_pred, noise=0.3)
     PGP_funcs = create_PGP_iter_functions(PGP_data, seqs_shape, num_all_units, 
                                PGP_layers, num_not_pred, momentum=0.9)
 
@@ -792,7 +807,7 @@ def main():
     now = time.time()
     num_epochs = 500
     try:
-        for epoch in train(PGP_funcs, PGP_data, learning_rate=0.001,batch_size=batch_size, pretrain=False):
+        for epoch in train(PGP_funcs, PGP_data, learning_rate=0.01,batch_size=batch_size, pretrain=False):
             print("Epoch {} of {} took {:.3f}s".format(
                 epoch['number'], num_epochs, time.time() - now))
             now = time.time()
@@ -808,13 +823,22 @@ def main():
     except KeyboardInterrupt:
         pass
 
+    # plot
+    #print 'Ploting ...'
+    #plt.figure(1)
+    #plt.axis('tight')
+    #truth = plt.plot(PGP_data['X_train_np'].reshape(num_train, timesteps*framedim)[0],'b-', label='ground truth')
+    #plt.ylabel('sin(x)')
+    #vis
+    #prediction = plt.plot(prediction.flatten(), 'g-', label='prediction')
+
 
 if __name__ == '__main__':
     main()
 
 
 ##########
-# Below codes are obsolete 
+# Below codes are deprecated 
 #########
 class GateTriangleLayer(ElemwiseMergeLayer):
     def __init__(self, incomings, num_units, W=init.GlorotUniform(), b=init.Constant(0.), nonlinearity=nonlinearities.sigmoid, **kwargs):
