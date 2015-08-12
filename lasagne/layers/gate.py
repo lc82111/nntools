@@ -12,7 +12,7 @@ from lasagne.updates import nesterov_momentum
 from lasagne.objectives import squared_error
 from lasagne import init 
 from lasagne import utils 
-from lasagne.layers import Layer, SliceLayer, MergeLayer, ElemwiseMergeLayer, InputLayer, DropoutLayer, helper, GaussianNoiseLayer
+from lasagne.layers import Layer, MergeLayer, ElemwiseMergeLayer, InputLayer, DropoutLayer, helper, GaussianNoiseLayer
 import lasagne
 
 #from .. import nonlinearities
@@ -287,6 +287,38 @@ class PGPLayer(Layer):
         params += helper.get_all_params(self.l_m, **tags)
         return params
 
+class JerkLayer(Layer):
+    def __init__(self, incoming, **kwargs):
+        super(JerkLayer, self).__init__(incoming, **kwargs)
+
+        # build dynamic between jerks' timesteps. create scalar (ndim=0) (shape=()) with init value 0.5
+        self.autonomy = self.add_param(utils.floatX(0.5), shape=(), name='autonomy', regularizable=False)
+        # transform autonomy to interval (0,1)
+        self.autonomy = T.nnet.sigmoid(self.autonomy)
+
+    def get_output_for(self, input, **kwargs):
+        # (n_batch, n_time_steps, n_features)---->(n_time_steps, n_batch, n_features)
+        input = input.dimshuffle(1, 0, 2)
+
+        def step(j_n, prev_j, *args):
+            return prev_j*self.autonomy + j_n*(1-self.autonomy)
+
+        out = theano.scan(
+            fn=step,
+            sequences=input[1:,:,:], # discard first timestep
+            outputs_info=input[0,:,:], # use first timestep
+            non_sequences=[self.autonomy],
+            strict=True)[0]
+
+        # dimshuffle back to (n_batch, n_time_steps, n_features))
+        o = out.dimshuffle(1, 0, 2)
+        
+        return o
+
+    def get_output_shape_for(self, input_shape):
+        # jerk units have a number less than input  number
+        return input_shape[0], input_shape[1]-1, input_shape[2] 
+
 class PGPRLayer(MergeLayer):
     """
     expect two incoming layers in order: [l_acc, l_jerk]
@@ -295,7 +327,7 @@ class PGPRLayer(MergeLayer):
                incomings, # except incomings=[l_a, l_j], l_j should be sliced to discard first timstep
                num_not_pred,# vis:4 vec:3 acc:2 jerk:1
                weight_tiled_layer,# share l_jerk weights with this layer
-               mixing, # mixing acc_r with acc?
+               mixing, # False or autonomy. mixing acc_r with acc?
                b_m_tiled=True,    # True or False
                nonlinearity=nonlinearities.sigmoid,
                grad_clipping=False,
@@ -313,10 +345,7 @@ class PGPRLayer(MergeLayer):
         self.grad_clipping = grad_clipping
         self.mixing=mixing
         if self.mixing:
-            # create scalar (ndim=0) (shape=()) with init value 0.5
-            self.autonomy = self.add_param(utils.floatX(0.5), shape=(), name='autonomy', regularizable=False)
-            # transform to interval (0,1)
-            self.autonomy = T.nnet.sigmoid(self.autonomy)
+            self.autonomy = self.mixing
 
         # (batch_size, seq_len, frame_dim)
         if self.input_shapes[0][0]!=self.input_shapes[1][0]:
@@ -385,7 +414,8 @@ class PGPRLayer(MergeLayer):
 
         # mixing acc and acc_r
         if self.mixing:
-            a_r = (1-self.autonomy)*a_r + self.autonomy*inputs[0][self.num_not_pred:,:,:]  
+            #a_r = (1-self.autonomy)*a_r + self.autonomy*inputs[0][self.num_not_pred:,:,:]  
+            a_r = (self.autonomy)*a_r + (1-self.autonomy)*inputs[0][self.num_not_pred:,:,:]  
         # dimshuffle back to (n_batch, n_time_steps, n_features))
         a_r = a_r.dimshuffle(1, 0, 2)
 
@@ -406,17 +436,18 @@ def build_PGP(seqs_shape, num_all_units, num_not_pred, noise):
     # Forward computer mapping units 
     l_i = InputLayer(shape=seqs_shape) 
     l_n = GaussianNoiseLayer(l_i, sigma=noise) 
-    l_v = PGPLayer(l_n, num_factors=num_all_units['v_f'], num_maps=num_all_units['v_m'])
-    l_a = PGPLayer(l_v, num_factors=num_all_units['a_f'], num_maps=num_all_units['a_m'])
-    l_j = PGPLayer(l_a, num_factors=num_all_units['j_f'], num_maps=num_all_units['j_m'])
+    l_v = PGPLayer(l_n, num_factors=num_all_units['v_f'], num_maps=num_all_units['v_m'], name='vec layer')
+    l_a = PGPLayer(l_v, num_factors=num_all_units['a_f'], num_maps=num_all_units['a_m'], name='acc layer')
+    l_j = PGPLayer(l_a, num_factors=num_all_units['j_f'], num_maps=num_all_units['j_m'], name='jerk layer')
     # bulid RNN layer for modeling dynamic along time steps along every jerk 
     #l_rnn = LSTMLayer(l_j, num_units=num_all_units['j_rnn_h_units'], peepholes=False, grad_clipping=50)
     # Slice all timesteps except first one, i.e. [:,1:,:]
-    l_slice=SliceLayer(l_j, indices=slice(1,None), axis=1)
+    #l_slice=SliceLayer(l_j, indices=slice(1,None), axis=1)
+    l_j_p = JerkLayer(l_j, name='post-jerk layer')
     # reconstruct a, v and vis
-    l_a_r = PGPRLayer([l_a,l_slice], num_not_pred=num_not_pred-2, b_m_tiled=True,  weight_tiled_layer=l_j, mixing=True) 
-    l_v_r = PGPRLayer([l_v,l_a_r],   num_not_pred=num_not_pred-1, b_m_tiled=True,  weight_tiled_layer=l_a, mixing=True)
-    l_i_r = PGPRLayer([l_i,l_v_r],   num_not_pred=num_not_pred, b_m_tiled=False, weight_tiled_layer=l_v, mixing=False)
+    l_a_r = PGPRLayer([l_a,l_j_p], num_not_pred=num_not_pred-2, b_m_tiled=True,  weight_tiled_layer=l_j, mixing=l_j_p.autonomy) 
+    l_v_r = PGPRLayer([l_v,l_a_r], num_not_pred=num_not_pred-1, b_m_tiled=True,  weight_tiled_layer=l_a, mixing=l_j_p.autonomy)
+    l_i_r = PGPRLayer([l_i,l_v_r], num_not_pred=num_not_pred, b_m_tiled=False, weight_tiled_layer=l_v, mixing=l_j_p.autonomy)
 
     return dict(v=l_v, a=l_a, j=l_j, i_r=l_i_r)
 
@@ -709,11 +740,11 @@ def main():
     num_not_pred = 4 # vision frames reserved for infer remaining frames.
 
     # build PGP network and iter functions
-    PGP_layers = build_PGP(seqs_shape, num_all_units, num_not_pred, noise=0)
+    PGP_layers = build_PGP(seqs_shape, num_all_units, num_not_pred, noise=0.3)
     PGP_funcs = create_PGP_iter_functions(PGP_data, seqs_shape, num_all_units, 
                                PGP_layers, num_not_pred, momentum=0.9)
 
-    PRETRAIN = True 
+    PRETRAIN = False 
     if PRETRAIN:
         # pretrain using GAE model
         # train vec
@@ -748,7 +779,7 @@ def main():
         # train acc 
         acc_layers = main_GAE(acc_data, num_epochs=3, batch_size=100, 
                               num_fac=num_all_units['a_f'], num_maps=num_all_units['a_m'], 
-                             learning_rate=0.0005, noise=0.3, pretrain=True)
+                             learning_rate=0.01, noise=0.3, pretrain=True)
 
         # set PGP acc layer weight 
         PGP_layers['a'].W_x.set_value(acc_layers['m'].W_x.get_value())
