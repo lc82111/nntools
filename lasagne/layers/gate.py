@@ -13,8 +13,8 @@ from lasagne.updates import nesterov_momentum
 from lasagne.objectives import squared_error
 from lasagne import init 
 from lasagne import utils 
-from lasagne.layers import Layer, MergeLayer, ElemwiseMergeLayer, InputLayer, DropoutLayer, helper, GaussianNoiseLayer, SliceLayer
-import lasagne
+from lasagne.layers import Layer, MergeLayer, ElemwiseMergeLayer, InputLayer, DropoutLayer, helper, NonlinearityLayer, SliceLayer
+#import lasagne
 
 #from .. import nonlinearities
 #from .. import init
@@ -289,8 +289,11 @@ class PGPLayer(Layer):
         return params
 
 class JerkLayer(Layer):
-    def __init__(self, incoming, **kwargs):
+    def __init__(self, incoming, seq_len, num_not_pred, nonlinearity,  **kwargs):
         super(JerkLayer, self).__init__(incoming, **kwargs)
+        self.nonlinearity = (nonlinearities.identity if nonlinearity is None else nonlinearity)
+        self.timesteps = seq_len - num_not_pred # 16-4=12
+        
 
         # build dynamic between jerks' timesteps. create scalar (ndim=0) (shape=()) with init value 0.5
         self.autonomy = self.add_param(utils.floatX(0.5), shape=(), name='autonomy', regularizable=False)
@@ -301,20 +304,23 @@ class JerkLayer(Layer):
         # (n_batch, n_time_steps, n_features)---->(n_time_steps, n_batch, n_features)
         input = input.dimshuffle(1, 0, 2)
 
-        def step(j_n, prev_j, *args):
-            return prev_j*self.autonomy + j_n*(1-self.autonomy)
+        # slice last time step of the input
+        _input = input[-1,:,:]
+
+        def step(prev, _au, _i):
+            return prev*_au + _i*(1-_au)
 
         out = theano.scan(
             fn=step,
-            sequences=input[1:,:,:], # discard first timestep
             outputs_info=input[0,:,:], # use first timestep
-            non_sequences=[self.autonomy],
+            non_sequences=[self.autonomy, _input],
+            n_steps=self.timesteps,
             strict=True)[0]
 
         # dimshuffle back to (n_batch, n_time_steps, n_features))
         o = out.dimshuffle(1, 0, 2)
         
-        return o
+        return self.nonlinearity(o)
 
     def get_output_shape_for(self, input_shape):
         # jerk units have a number less than input  number
@@ -345,8 +351,6 @@ class PGPRLayer(MergeLayer):
         self.nonlinearity = (nonlinearities.identity if nonlinearity is None else nonlinearity)
         self.grad_clipping = grad_clipping
         self.mixing=mixing
-        if self.mixing:
-            self.autonomy = self.mixing
 
         # (batch_size, seq_len, frame_dim)
         if self.input_shapes[0][0]!=self.input_shapes[1][0]:
@@ -367,10 +371,10 @@ class PGPRLayer(MergeLayer):
         # tile b_m or not
         b_m = (l_a.b_m if b_m_tiled else init.Constant(0.))
 
-        # init FactorGateLayer instance
+        # init FactorGateLayer instance, None nonlinearity is applied in l_m
         self.l_a_i = InputLayer(shape=(self.batch_size, self.frame_dim_a), name='PGPRLayer l_a_i')
         self.l_jp_i = InputLayer(shape=(self.batch_size, self.frame_dim_jp), name='PGPRLayer l_jp_i')
-        self.l_m   = FactorGateLayer([self.l_a_i, self.l_jp_i], num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, nonlinearity=self.nonlinearity, name='PGPRLayer l_m')
+        self.l_m   = FactorGateLayer([self.l_a_i, self.l_jp_i], num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, nonlinearity=None, name='PGPRLayer l_m')
 
     def get_output_for(self, inputs, **kwargs):
         #inputs: l_a:(batch, time, dim) l_jp:(batch, time, dim)
@@ -380,47 +384,63 @@ class PGPRLayer(MergeLayer):
         inputs[0]=inputs[0].dimshuffle(1,0,2)
         inputs[1]=inputs[1].dimshuffle(1,0,2)
 
-        # Slice one timestep from acc, a:2d
-        a = inputs[0][self.num_not_pred-1,:,:]
+        # Slice two timesteps from acc, a:2d
+        a123 = inputs[0][self.num_not_pred-1,:,:]
+        a234 = inputs[0][self.num_not_pred,  :,:]
         # all timesteps from jerk_processd 
         #num_not_pred_j = self.num_not_pred-1
         #j = inputs[1][num_not_pred_j:,:,:]
         jp = inputs[1]
 
-        # Create single recurrent computation step function
-        def step(jp_n, prev_a, *args):
-
-            # computer maps units
-            maps = helper.get_output(self.l_m, {self.l_a_i:prev_a, self.l_jp_i:jp_n})
-
-            # Clip gradients
-            if self.grad_clipping is not False:
-                maps = theano.gradient.grad_clip(
-                    maps, -self.grad_clipping, self.grad_clipping)
-
-            return maps
-
+        
         # The l_m params are unchange during scan
         # non_seqs = helper.get_all_params(self.l_m) is not enough to get all params         
         # So we need specific l_m's params 
-        non_seqs = [self.l_m.W_x, self.l_m.W_y, self.l_m.W_m, self.l_m.b_m]
-      
-        # Scan op iterates over first dimension of input and repeatedly applies the step function
+        # autonomy/mixing and a234 should be provided during every step, so they are in list
+        if self.mixing:
+            def step(jp_n, prev_a, _au, _a234, *args):
+                 # computer maps units
+                maps = helper.get_output(self.l_m, {self.l_a_i:prev_a, self.l_jp_i:jp_n})
+
+                # Clip gradients
+                if self.grad_clipping is not False:
+                    maps = theano.gradient.grad_clip(
+                        maps, -self.grad_clipping, self.grad_clipping)
+
+                # weighted sum the output with a234
+                maps = _au*maps + (1-_au)*_a234  
+
+                return maps
+
+            non_seqs = [self.mixing, a234] + [self.l_m.W_x, self.l_m.W_y, self.l_m.W_m, self.l_m.b_m]
+        else:
+            def step(jp_n, prev_a, _au, _a234, *args):
+                 # computer maps units
+                maps = helper.get_output(self.l_m, {self.l_a_i:prev_a, self.l_jp_i:jp_n})
+
+                # Clip gradients
+                if self.grad_clipping is not False:
+                    maps = theano.gradient.grad_clip(
+                        maps, -self.grad_clipping, self.grad_clipping)
+
+                return maps
+
+            non_seqs = [a234] + [self.l_m.W_x, self.l_m.W_y, self.l_m.W_m, self.l_m.b_m]
         a_r = theano.scan(
-            fn=step,
-            sequences=jp,
-            non_sequences=non_seqs,
-            outputs_info=[a],
-            strict=True)[0]
+        fn=step,
+        sequences=jp,
+        non_sequences=non_seqs,
+        outputs_info=[a123],
+        strict=True)[0]
 
         # mixing acc and acc_r
-        if self.mixing:
-            #a_r = (1-self.autonomy)*a_r + self.autonomy*inputs[0][self.num_not_pred:,:,:]  
-            a_r = (self.autonomy)*a_r + (1-self.autonomy)*inputs[0][self.num_not_pred:,:,:]  
+        #if self.mixing:
+        #    a_r = (self.autonomy)*a_r + (1-self.autonomy)*inputs[0][self.num_not_pred:,:,:]  
         # dimshuffle back to (n_batch, n_time_steps, n_features))
         a_r = a_r.dimshuffle(1, 0, 2)
 
-        return a_r
+        # applying nonliearity at output not step func
+        return self.nonlinearity(a_r)
 
     def get_output_shape_for(self, input_shapes):
         # batch, timestep, framedim
@@ -434,31 +454,38 @@ class PGPRLayer(MergeLayer):
         return params
 
 def build_PGP(seqs_shape, num_all_units, num_not_pred, noise):
-    # Forward computer mapping units 
+    # Forward propagate  mapping units 
     l_i = InputLayer(shape=seqs_shape) 
-    l_n = GaussianNoiseLayer(l_i, sigma=noise) 
-    l_v = PGPLayer(l_n, num_factors=num_all_units['v_f'], num_maps=num_all_units['v_m'], name='vec layer')
-    l_a = PGPLayer(l_v, num_factors=num_all_units['a_f'], num_maps=num_all_units['a_m'], name='acc layer')
-    l_j = PGPLayer(l_a, num_factors=num_all_units['j_f'], num_maps=num_all_units['j_m'], name='jerk layer')
+    # Slice begining num_not_pred+1 frames to forward propagate (batchsize, timesteps[:5], framedim)
+    l_i = SliceLayer(l_i, indices=slice(None,num_not_pred+1), axis=1)
+    l_n = DropoutLayer(l_i, p=noise) 
+
+    l_v = PGPLayer(l_n, num_factors=num_all_units['v_f'], num_maps=num_all_units['v_m'], nonlinearity=None, name='vec layer')
+    l_v_n = NonlinearityLayer(l_v, nonlinearity=nonlinearities.sigmoid)
+
+    l_a = PGPLayer(l_v_n, num_factors=num_all_units['a_f'], num_maps=num_all_units['a_m'], nonlinearity=None, name='acc layer')
+    l_a_n = NonlinearityLayer(l_a, nonlinearity=nonlinearities.sigmoid)
+
+    l_j = PGPLayer(l_a_n, num_factors=num_all_units['j_f'], num_maps=num_all_units['j_m'], nonlinearity=None, name='jerk layer')
     # bulid RNN layer for modeling dynamic along time steps along every jerk 
     #l_rnn = LSTMLayer(l_j, num_units=num_all_units['j_rnn_h_units'], peepholes=False, grad_clipping=50)
     # Slice all timesteps except first one, i.e. [:,1:,:]
     #l_slice=SliceLayer(l_j, indices=slice(1,None), axis=1)
-    l_j_p = JerkLayer(l_j, name='post-jerk layer')
+    l_j_p = JerkLayer(l_j, nonlinearity=nonlinearities.sigmoid, seq_len=seqs_shape[1], num_not_pred=num_not_pred, name='post-jerk layer')
+    
     # reconstruct a, v and vis
     l_a_r = PGPRLayer([l_a,l_j_p], num_not_pred=num_not_pred-2, b_m_tiled=True,  weight_tiled_layer=l_j, mixing=l_j_p.autonomy, name='acc reconstr layer') 
     l_v_r = PGPRLayer([l_v,l_a_r], num_not_pred=num_not_pred-1, b_m_tiled=True,  weight_tiled_layer=l_a, mixing=l_j_p.autonomy, name='vec reconstr layer')
-    l_i_r = PGPRLayer([l_i,l_v_r], num_not_pred=num_not_pred, b_m_tiled=False, weight_tiled_layer=l_v, mixing=False, name='vis reconstr layer')
+    l_i_r = PGPRLayer([l_i,l_v_r], num_not_pred=num_not_pred, b_m_tiled=False, weight_tiled_layer=l_v, mixing=False, nonlinearity=None, name='vis reconstr layer')
 
     return dict(v=l_v, a=l_a, j=l_j, i_r=l_i_r)
 
-def build_PGP2(seqs_shape, num_all_units, num_not_pred, noise):
+def build_PGP_2layers(seqs_shape, num_all_units, num_not_pred, noise):
     # Forward computer mapping units 
     l_i = InputLayer(shape=seqs_shape) 
-    #l_n = GaussianNoiseLayer(l_i, sigma=noise) 
-    l_v = PGPLayer(l_i, num_factors=num_all_units['v_f'], num_maps=num_all_units['v_m'], name='vec layer')
+    l_n = DropoutLayer(l_i, p=noise) 
+    l_v = PGPLayer(l_n, num_factors=num_all_units['v_f'], num_maps=num_all_units['v_m'], name='vec layer')
     l_vp= JerkLayer(l_v, name='post vec layer')
-    #l_s =SliceLayer(l_v, indices=slice(1,None), axis=1)
     # reconstruct a, v and vis
     l_i_r = PGPRLayer([l_i,l_vp], num_not_pred=num_not_pred, b_m_tiled=False, weight_tiled_layer=l_v, mixing=False, name='vis reconstr layer')
 
@@ -480,10 +507,12 @@ def create_PGP_iter_functions( dataset, seqs_shape, num_all_units, layers, num_n
     X_batch_r  = helper.get_output(layers['i_r'], X_batch, deterministic=False)
     X_batch_r_t= helper.get_output(layers['i_r'], X_batch, deterministic=True)
     #i_r = helper.get_output(layers['i_r'], X, deterministic=True)
+    v_o = helper.get_output(layers['v'], X, deterministic=True)
+
 
     # loss
-    loss_train = squared_error(X_batch_r,   X_batch[:,num_not_pred:,:]).sum(axis=2).mean(1).mean(0)
-    loss_eval  = squared_error(X_batch_r_t, X_batch[:,num_not_pred:,:]).sum(axis=2).mean(1).mean(0)
+    loss_train = squared_error(X_batch_r,   X_batch[:,num_not_pred:,:]).mean()
+    loss_eval  = squared_error(X_batch_r_t, X_batch[:,num_not_pred:,:]).mean()
 
     # form batch slice
     batch_index = T.iscalar('batch_index')
@@ -494,8 +523,8 @@ def create_PGP_iter_functions( dataset, seqs_shape, num_all_units, layers, num_n
     all_params = helper.get_all_params(layers['i_r'])
     learning_rate = T.scalar('learning_rate',dtype=theano.config.floatX)
     learning_rate.tag.test_value = 0.01
-    #updates = nesterov_momentum(loss_train, all_params, learning_rate, momentum)
-    updates = lasagne.updates.adam(loss_train, all_params, learning_rate)
+    updates = nesterov_momentum(loss_train, all_params, learning_rate, momentum)
+    #updates = lasagne.updates.adam(loss_train, all_params, learning_rate)
 
     # dump funcs
     #iter_valid = theano.function_dump(
@@ -528,15 +557,15 @@ def create_PGP_iter_functions( dataset, seqs_shape, num_all_units, layers, num_n
         },
     )
 
-       # i_r_fun = theano.function(
-       #     [X], i_r,
-       # )
+    # i_r_fun = theano.function([X], i_r)
+    v_func = theano.function([X], v_o,)
 
     return dict(
         train=iter_train,
         valid=iter_valid,
         test=iter_test,
         #vis_reconstruc=i_r_fun, 
+        vec_out=v_func
     )
 
     ## prediction
@@ -747,15 +776,16 @@ def main():
     GAE_data, PGP_data = make_sinwave()
 
     # (batchsize, timsteps, framedim)
-    num_train=PGP_data['num_train']; batch_size=400
+   # num_train=PGP_data['num_train']; 
+    batch_size=400
     timesteps=PGP_data['timesteps']; framedim=PGP_data['frame_dim'] 
     seqs_shape = (batch_size, timesteps, framedim)
     num_all_units= dict(vis=16, v_f=200,v_m=100,a_f=100,a_m=50,j_f=10,j_m=10,j_rnn_h_units=10)
     # TODO 4 or 2 
-    num_not_pred = 2 # vision frames reserved for infer remaining frames.
+    num_not_pred = 4 # vision frames reserved for infer remaining frames.
 
     # build PGP network and iter functions
-    PGP_layers = build_PGP2(seqs_shape, num_all_units, num_not_pred, noise=0.3)
+    PGP_layers = build_PGP(seqs_shape, num_all_units, num_not_pred, noise=0.0)
     PGP_funcs = create_PGP_iter_functions(PGP_data, seqs_shape, num_all_units, 
                                PGP_layers, num_not_pred, momentum=0.9)
 
@@ -763,7 +793,7 @@ def main():
     if PRETRAIN:
         # pretrain using GAE model
         # train vec
-        vec_layers = main_GAE(GAE_data, num_epochs=3, batch_size=100, 
+        vec_layers = main_GAE(GAE_data, num_epochs=10, batch_size=100, 
                               num_fac=num_all_units['v_f'], num_maps=num_all_units['v_m'], 
                               learning_rate=0.01, noise=0.3, pretrain=False)
 
@@ -792,7 +822,7 @@ def main():
                         Y_train=theano.shared(utils.floatX(Y_v_o)),
                         ) 
         # train acc 
-        acc_layers = main_GAE(acc_data, num_epochs=3, batch_size=100, 
+        acc_layers = main_GAE(acc_data, num_epochs=10, batch_size=100, 
                               num_fac=num_all_units['a_f'], num_maps=num_all_units['a_m'], 
                              learning_rate=0.01, noise=0.3, pretrain=True)
 
@@ -806,8 +836,8 @@ def main():
     print("Starting training PGP ...")
     now = time.time()
     num_epochs = 500
-    try:
-        for epoch in train(PGP_funcs, PGP_data, learning_rate=0.01,batch_size=batch_size, pretrain=False):
+    try:  # 2layer learing_rate=0.0005  
+        for epoch in train(PGP_funcs, PGP_data, learning_rate=0.001,batch_size=batch_size, pretrain=False):
             print("Epoch {} of {} took {:.3f}s".format(
                 epoch['number'], num_epochs, time.time() - now))
             now = time.time()
@@ -973,4 +1003,37 @@ class PGPLayer_old_copyXY(Layer):
         # Combine with all parameters from the child layers
         params += helper.get_all_params(self.l_m, **tags)
         return params
+
+class JerkLayer_old(Layer):
+    def __init__(self, incoming, nonlinearity,  **kwargs):
+        super(JerkLayer, self).__init__(incoming, **kwargs)
+        self.nonlinearity = (nonlinearities.identity if nonlinearity is None else nonlinearity)
+
+        # build dynamic between jerks' timesteps. create scalar (ndim=0) (shape=()) with init value 0.5
+        self.autonomy = self.add_param(utils.floatX(0.5), shape=(), name='autonomy', regularizable=False)
+        # transform autonomy to interval (0,1)
+        self.autonomy = T.nnet.sigmoid(self.autonomy)
+
+    def get_output_for(self, input, **kwargs):
+        # (n_batch, n_time_steps, n_features)---->(n_time_steps, n_batch, n_features)
+        input = input.dimshuffle(1, 0, 2)
+
+        def step(j_n, prev_j, *args):
+            return prev_j*self.autonomy + j_n*(1-self.autonomy)
+
+        out = theano.scan(
+            fn=step,
+            sequences=input[1:,:,:], # discard first timestep
+            outputs_info=input[0,:,:], # use first timestep
+            non_sequences=[self.autonomy],
+            strict=True)[0]
+
+        # dimshuffle back to (n_batch, n_time_steps, n_features))
+        o = out.dimshuffle(1, 0, 2)
+        
+        return self.nonlinearity(o)
+
+    def get_output_shape_for(self, input_shape):
+        # jerk units have a number less than input  number
+        return input_shape[0], input_shape[1]-1, input_shape[2] 
 
