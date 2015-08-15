@@ -379,8 +379,8 @@ class PGPRLayer(MergeLayer):
         inputs[0]=inputs[0].dimshuffle(1,0,2)
         inputs[1]=inputs[1].dimshuffle(1,0,2)
 
-        # Slice acc_out[2-1,:,:]
-        a = inputs[0][self.num_not_pred-1,:,:]
+        # Slice acc_out[2-1:,:,:]
+        a = inputs[0][self.num_not_pred-1:,:,:]
         # get all timesteps from jerk_processd 
         jp = inputs[1]
 
