@@ -371,6 +371,9 @@ class PGPRLayer(MergeLayer):
         self.l_jp_i = InputLayer(shape=(self.batch_size, self.frame_dim_jp), name='PGPRLayer l_jp_i')
         self.l_m   = FactorGateLayer([self.l_a_i, self.l_jp_i], num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, nonlinearity=None, name='PGPRLayer l_m')
 
+        # Make child layer parameters intuitively accessible
+        self.W_x=self.l_m.W_x; self.W_y=self.l_m.W_y; self.W_m=self.l_m.W_m; self.b_m=self.l_m.b_m
+
     def get_output_for(self, inputs, **kwargs):
         #inputs: l_a:(batch, time, dim) l_jp:(batch, time, dim)
 
