@@ -791,7 +791,7 @@ def main():
         # train acc 
         acc_layers = main_GAE(acc_data, num_epochs=10, batch_size=100, 
                               num_fac=num_all_units['a_f'], num_maps=num_all_units['a_m'], 
-                             learning_rate=0.01, noise=0.3, pretrain=True)
+                             learning_rate=0.005, noise=0.3, pretrain=True)
 
         # set PGP acc layer weight 
         PGP_layers['a'].W_x.set_value(acc_layers['m'].W_x.get_value())
