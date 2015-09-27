@@ -17,6 +17,7 @@
     layers/shape
     layers/merge
     layers/embedding
+    layers/special
     layers/corrmm
     layers/cuda_convnet
     layers/dnn
@@ -59,7 +60,6 @@
     :nosignatures:
 
     DenseLayer
-    NonlinearityLayer
     NINLayer
 
 
@@ -79,7 +79,9 @@
 
     MaxPool1DLayer
     MaxPool2DLayer
+    Pool1DLayer
     Pool2DLayer
+    Upscale2DLayer
     GlobalPoolLayer
     FeaturePoolLayer
     FeatureWTALayer
@@ -140,6 +142,17 @@
     :nosignatures:
 
     EmbeddingLayer
+
+
+.. rubric:: :doc:`layers/special`
+
+.. autosummary::
+    :nosignatures:
+
+    NonlinearityLayer
+    BiasLayer
+    InverseLayer
+    TransformerLayer
 
 
 .. rubric:: :doc:`layers/corrmm`

@@ -1,4 +1,4 @@
-.. image:: http://img.shields.io/badge/docs-latest-brightgreen.svg
+.. image:: https://readthedocs.org/projects/lasagne/badge/
     :target: http://lasagne.readthedocs.org/en/latest/
 
 .. image:: https://travis-ci.org/Lasagne/Lasagne.svg?branch=master
@@ -7,8 +7,11 @@
 .. image:: https://img.shields.io/coveralls/Lasagne/Lasagne.svg
     :target: https://coveralls.io/r/Lasagne/Lasagne
 
-.. image:: https://img.shields.io/github/license/Lasagne/Lasagne.svg
+.. image:: https://img.shields.io/badge/license-MIT-blue.svg
     :target: https://github.com/Lasagne/Lasagne/blob/master/LICENSE
+
+.. image:: https://zenodo.org/badge/16974/Lasagne/Lasagne.svg
+   :target: https://zenodo.org/badge/latestdoi/16974/Lasagne/Lasagne
 
 Lasagne
 =======

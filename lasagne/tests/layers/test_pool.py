@@ -70,6 +70,19 @@ def max_pool_2d_ignoreborder(data, pool_size, stride, pad):
     return data_pooled
 
 
+def upscale_2d_shape(shape, scale_factor):
+    return (shape[0], shape[1],
+            shape[2] * scale_factor[0], shape[3] * scale_factor[1])
+
+
+def upscale_2d(data, scale_factor):
+    upscaled = np.zeros(upscale_2d_shape(data.shape, scale_factor))
+    for j in range(scale_factor[0]):
+        for i in range(scale_factor[1]):
+            upscaled[:, :, j::scale_factor[0], i::scale_factor[1]] = data
+    return upscaled
+
+
 class TestFeaturePoolLayer:
     def pool_test_sets():
         for pool_size in [2, 3]:
@@ -203,8 +216,7 @@ class TestMaxPool2DLayer:
                     yield (pool_size, stride, pad)
 
     def input_layer(self, output_shape):
-        return Mock(get_output_shape=lambda: output_shape,
-                    output_shape=output_shape)
+        return Mock(output_shape=output_shape)
 
     def layer(self, input_layer, pool_size, stride=None,
               pad=(0, 0), ignore_border=False):
@@ -293,8 +305,7 @@ class TestMaxPool2DCCLayer:
                 yield (pool_size, stride)
 
     def input_layer(self, output_shape):
-        return Mock(get_output_shape=lambda: output_shape,
-                    output_shape=output_shape)
+        return Mock(output_shape=output_shape)
 
     def layer(self, input_layer, pool_size, stride):
         try:
@@ -356,29 +367,29 @@ class TestMaxPool2DCCLayer:
 
         input_layer = self.input_layer((128, 4, 12, 12))
 
-        with pytest.raises(RuntimeError) as exc:
+        with pytest.raises(NotImplementedError) as exc:
             layer = MaxPool2DCCLayer(input_layer, pool_size=2, pad=2)
         assert "MaxPool2DCCLayer does not support padding" in exc.value.args[0]
 
-        with pytest.raises(RuntimeError) as exc:
+        with pytest.raises(NotImplementedError) as exc:
             layer = MaxPool2DCCLayer(input_layer, pool_size=(2, 3))
         assert ("MaxPool2DCCLayer only supports square pooling regions" in
                 exc.value.args[0])
 
-        with pytest.raises(RuntimeError) as exc:
+        with pytest.raises(NotImplementedError) as exc:
             layer = MaxPool2DCCLayer(input_layer, pool_size=2, stride=(1, 2))
         assert (("MaxPool2DCCLayer only supports using the same stride in "
                  "both directions") in exc.value.args[0])
 
-        with pytest.raises(RuntimeError) as exc:
+        with pytest.raises(NotImplementedError) as exc:
             layer = MaxPool2DCCLayer(input_layer, pool_size=2, stride=3)
         assert ("MaxPool2DCCLayer only supports stride <= pool_size" in
                 exc.value.args[0])
 
-        with pytest.raises(RuntimeError) as exc:
+        with pytest.raises(NotImplementedError) as exc:
             layer = MaxPool2DCCLayer(input_layer, pool_size=2,
                                      ignore_border=True)
-        assert ("MaxPool2DCCLayer does not support ignore_border" in
+        assert ("MaxPool2DCCLayer does not support ignore_border=True" in
                 exc.value.args[0])
 
     def test_dimshuffle_false(self):
@@ -407,8 +418,7 @@ class TestMaxPool2DNNLayer:
                     yield (pool_size, stride, pad)
 
     def input_layer(self, output_shape):
-        return Mock(get_output_shape=lambda: output_shape,
-                    output_shape=output_shape)
+        return Mock(output_shape=output_shape)
 
     def layer(self, input_layer, pool_size, stride, pad):
         try:
@@ -467,6 +477,78 @@ class TestMaxPool2DNNLayer:
         except NotImplementedError:
             raise
         #    pytest.skip()
+
+    def test_not_implemented(self):
+        try:
+            from lasagne.layers.dnn import MaxPool2DDNNLayer
+        except ImportError:
+            pytest.skip("cuDNN not available")
+        with pytest.raises(NotImplementedError) as exc:
+            layer = MaxPool2DDNNLayer((1, 2, 3, 4), pool_size=2,
+                                      ignore_border=False)
+        assert ("Pool2DDNNLayer does not support ignore_border=False" in
+                exc.value.args[0])
+
+
+class TestUpscale2DLayer:
+    def scale_factor_test_sets():
+        for scale_factor in [2, 3]:
+                yield scale_factor
+
+    def input_layer(self, output_shape):
+        return Mock(output_shape=output_shape)
+
+    def layer(self, input_layer, scale_factor):
+        from lasagne.layers.pool import Upscale2DLayer
+        return Upscale2DLayer(
+            input_layer,
+            scale_factor=scale_factor,
+        )
+
+    def test_invalid_scale_factor(self):
+        from lasagne.layers.pool import Upscale2DLayer
+        inlayer = self.input_layer((128, 3, 32, 32))
+        with pytest.raises(ValueError):
+            Upscale2DLayer(inlayer, scale_factor=0)
+        with pytest.raises(ValueError):
+            Upscale2DLayer(inlayer, scale_factor=-1)
+        with pytest.raises(ValueError):
+            Upscale2DLayer(inlayer, scale_factor=(0, 2))
+        with pytest.raises(ValueError):
+            Upscale2DLayer(inlayer, scale_factor=(2, 0))
+
+    @pytest.mark.parametrize(
+        "scale_factor", list(scale_factor_test_sets()))
+    def test_get_output_for(self, scale_factor):
+        input = floatX(np.random.randn(8, 16, 17, 13))
+        input_layer = self.input_layer(input.shape)
+        input_theano = theano.shared(input)
+        result = self.layer(
+            input_layer,
+            (scale_factor, scale_factor),
+        ).get_output_for(input_theano)
+
+        result_eval = result.eval()
+        numpy_result = upscale_2d(input, (scale_factor, scale_factor))
+
+        assert np.all(numpy_result.shape == result_eval.shape)
+        assert np.allclose(result_eval, numpy_result)
+
+    @pytest.mark.parametrize(
+        "input_shape,output_shape",
+        [((32, 64, 24, 24), (32, 64, 48, 48)),
+         ((None, 64, 24, 24), (None, 64, 48, 48)),
+         ((32, None, 24, 24), (32, None, 48, 48)),
+         ((32, 64, None, 24), (32, 64, None, 48)),
+         ((32, 64, 24, None), (32, 64, 48, None)),
+         ((32, 64, None, None), (32, 64, None, None))],
+    )
+    def test_get_output_shape_for(self, input_shape, output_shape):
+        input_layer = self.input_layer(input_shape)
+        layer = self.layer(input_layer,
+                           scale_factor=(2, 2))
+        assert layer.get_output_shape_for(
+            input_shape) == output_shape
 
 
 class TestFeatureWTALayer(object):

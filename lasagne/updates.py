@@ -537,9 +537,9 @@ def adam(loss_or_grads, params, learning_rate=0.001, beta1=0.9,
         The variables to generate update expressions for
     learning_rate : float
         Learning rate
-    beta_1 : float
+    beta1 : float
         Exponential decay rate for the first moment estimates.
-    beta_2 : float
+    beta2 : float
         Exponential decay rate for the second moment estimates.
     epsilon : float
         Constant for numerical stability.
@@ -681,7 +681,7 @@ def total_norm_constraint(tensor_vars, max_norm, epsilon=1e-7,
     ----------
     tensor_vars : List of TensorVariables.
         Tensors to be rescaled.
-    threshold : float
+    max_norm : float
         Threshold value for total norm.
     epsilon : scalar, optional
         Value used to prevent numerical instability when dividing by

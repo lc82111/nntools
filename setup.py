@@ -2,13 +2,12 @@ import os
 from setuptools import find_packages
 from setuptools import setup
 
-version = '0.1.dev'
+version = '0.2.dev1'
 
 here = os.path.abspath(os.path.dirname(__file__))
 try:
     README = open(os.path.join(here, 'README.rst')).read()
-    CHANGES = ''
-    # CHANGES = open(os.path.join(here, 'CHANGES.txt')).read()
+    CHANGES = open(os.path.join(here, 'CHANGES.rst')).read()
 except IOError:
     README = CHANGES = ''
 
@@ -27,7 +26,8 @@ tests_require = [
 setup(
     name="Lasagne",
     version=version,
-    description="neural network tools for Theano",
+    description="A lightweight library to build and train neural networks "
+                "in Theano",
     long_description="\n\n".join([README, CHANGES]),
     classifiers=[
         "Development Status :: 3 - Alpha",
@@ -40,12 +40,12 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         ],
     keywords="",
-    author="Sander Dieleman",
-    author_email="sanderdieleman@gmail.com",
+    author="Lasagne contributors",
+    author_email="lasagne-users@googlegroups.com",
     url="https://github.com/Lasagne/Lasagne",
     license="MIT",
     packages=find_packages(),
-    include_package_data=True,
+    include_package_data=False,
     zip_safe=False,
     install_requires=install_requires,
     extras_require={
