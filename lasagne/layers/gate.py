@@ -6,16 +6,85 @@ from .. import nonlinearities
 from .. import utils
 from .. import init
 from .base import Layer 
+from .dense import DenseLayer
 from .merge import MergeLayer 
 from .merge import ElemwiseMergeLayer 
 from . import helper 
 from .input import InputLayer
 
 __all__ = [
+    "FactorLayer",
     "PGPLayer",
     "RecurrentSoftmaxLayer",
     "AverageLayer",
+    "PGPBNLayer",
 ]
+
+class FactorLayer(Layer):
+    def __init__(self, incoming,
+                num_factors, 
+                W=init.GlorotUniform(),
+                # The role of this layer: 0 left factor or 1 right factor or 2 mapping
+                role=2,
+                **kwargs):
+
+        super(FactorLayer, self).__init__(incoming, **kwargs)
+        self.role = role
+        self.num_factors = num_factors
+        self.batch_size, self.seq_len, self.frame_dim = self.input_shape
+            
+        # init DenseLayer instance
+        self.l_i = InputLayer(shape=(self.batch_size, self.frame_dim),name='FactorLayerl_i')
+        self.l_f = DenseLayer(self.l_i, num_units=self.num_factors, W=W, b=None, 
+                              nonlinearity=None, name='FactorLayerl_f')
+        # Make child layer parameters intuitively accessible
+        self.W = self.l_f.W
+
+    def get_output_for(self, input, **kwargs):
+        input = input.dimshuffle(1, 0, 2)
+
+        # Create single recurrent computation step function
+        def step(input_n, *args):
+            # computer maps units
+            return helper.get_output(self.l_f, input_n)
+
+        # pass shared Var to step
+        non_seqs = helper.get_all_params(self.l_f)
+
+        if self.role is 0:
+            # left factor, discard last timestep
+            sequences = input[:-1,:,:]
+        elif self.role is 1: 
+            # right factor,  discard frist timestep
+            sequences = input[1:,:,:]
+        elif self.role is 2:
+            # mapping, do nothing
+            sequences = input
+      
+        # Scan op iterates over first dimension of input 
+        factor = theano.scan(
+                fn=step,
+                sequences=sequences, 
+                non_sequences=non_seqs,
+                strict=True)[0]
+
+        # dimshuffle back to (n_batch, n_time_steps, n_features))
+        factor = factor.dimshuffle(1, 0, 2)
+
+        return factor 
+
+    def get_output_shape_for(self, input_shape):
+        if self.role is 0 or self.role is 1:
+            return (input_shape[0], input_shape[1]-1, self.num_factors)
+        elif self.role is 2:
+            return (input_shape[0], input_shape[1], self.num_factors)
+
+    def get_params(self, **tags):
+        # Get all parameters from this layer, the master layer
+        params = super(FactorLayer, self).get_params(**tags)
+        # Combine with all parameters from the child layers
+        params += helper.get_all_params(self.l_f, **tags)
+        return params
 
 
 class FactorGateLayer(ElemwiseMergeLayer):
@@ -30,15 +99,18 @@ class FactorGateLayer(ElemwiseMergeLayer):
     """
     def __init__(self, incomings,
                 num_factors, num_maps, 
-                W_x=init.GlorotUniform(),#if callable create new shared tensor else weight is tired 
+                #if callable create new shared weights else weights is tired 
+                W_x=init.GlorotUniform(),
                 W_y=init.GlorotUniform(),
                 W_m=init.GlorotUniform(),
-                b_m=init.Constant(0.), nonlinearity=nonlinearities.sigmoid, **kwargs):
+                b_m=init.Constant(0.), 
+                nonlinearity=nonlinearities.sigmoid, **kwargs):
 
         # Make sure there are two incoming layers
         if len(incomings) != 2:
             raise ValueError('Incoming layer number not equal two. FactorGateLayer expects two input layers in order, eg: x layer & y layer')
 
+        # Using T.mul to init ElemwiseMergeLayer
         super(FactorGateLayer, self).__init__(incomings, merge_function=T.mul, **kwargs)
 
         self.nonlinearity = (nonlinearities.identity if nonlinearity is None else nonlinearity)
@@ -72,6 +144,7 @@ class FactorGateLayer(ElemwiseMergeLayer):
         #if any(shape != input_shapes[0] for shape in input_shapes):
         #    raise ValueError("Mismatch: not all input shapes are the same")
         return (input_shapes[0][0], self.num_maps)
+
 
 #TODO: research gradient clip mechanism
 class PGPLayer(Layer):
@@ -124,7 +197,8 @@ class PGPLayer(Layer):
         # We will always pass the hidden-to-hidden layer params to step
         non_seqs = helper.get_all_params(self.l_m)
       
-        # Scan op iterates over first dimension of input, the using of taps mk scan looks forward one timestep
+        # Scan op iterates over first dimension of input 
+        # the using of taps mk scan looks forward one timestep
         maps_out = theano.scan(
             fn=step,
             sequences=dict(input=input, taps=[-1,-0]),
@@ -146,6 +220,7 @@ class PGPLayer(Layer):
         # Combine with all parameters from the child layers
         params += helper.get_all_params(self.l_m, **tags)
         return params
+
 
 class JerkLayer(Layer):
     def __init__(self, incoming, nonlinearity,  **kwargs):
@@ -258,7 +333,7 @@ class PGPRLayer(MergeLayer):
 
             return maps
         # The l_m params are unchange during scan
-        # non_seqs = helper.get_all_params(self.l_m) is not enough to get all params         
+        # non_seqs = helper.get_all_params(self.l_m, **tags) is not enough to get all params         
         # So we need specific l_m's params 
         non_seqs = [self.l_m.W_x, self.l_m.W_y, self.l_m.W_m, self.l_m.b_m]
         a_r = theano.scan(
@@ -324,3 +399,128 @@ class AverageLayer(Layer):
 
     def get_output_for(self, input, *args, **kwargs):
         return input.mean(axis=1)
+
+
+# Deprecated codes 
+class FactorGateBNLayer(FactorGateLayer):
+    def __init__(self, incomings, 
+                mean, std, beta, gamma,
+                num_factors, num_maps, 
+                #if callable create new shared weights else weights is tired 
+                W_x=init.GlorotUniform(),
+                W_y=init.GlorotUniform(),
+                W_m=init.GlorotUniform(),
+                b_m=init.Constant(0.), 
+                nonlinearity=nonlinearities.sigmoid,
+                **kwargs):
+        super(FactorGateBNLayer, self).__init__(
+                incomings, 
+                num_factors, num_maps,
+                W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, 
+                nonlinearity=nonlinearity, 
+                **kwargs)
+        self.mean, self.std, self.bata, self.gamma = mean, std, beta, gamma
+
+    def get_output_for(self, inputs, deterministic=False,  **kwargs):
+          
+        X_factor = T.dot(inputs[0], self.W_x)
+        Y_factor = T.dot(inputs[1], self.W_y)
+
+        normalizedX = (X_factor - self.mean) * (self.gamma / self.std) + self.beta
+        normalizedY = (Y_factor - self.mean) * (self.gamma / self.std) + self.beta
+        inputs_factor = [normalizedX, normalizedY] 
+
+        _input = super(FactorGateLayer, self).get_output_for(inputs_factor, **kwargs)
+        activation = T.dot(_input, self.W_m)
+        if self.b_m is not None:
+            activation = activation + self.b_m.dimshuffle('x', 0)
+        return self.nonlinearity(activation)
+
+class PGPBNLayer(PGPLayer):
+    def __init__(self, incoming,
+                        num_factors, num_maps, 
+                        #if callable create new shared weights else weights is tired 
+                        W_x=init.GlorotUniform(),
+                        W_y=init.GlorotUniform(),
+                        W_m=init.GlorotUniform(),
+                        b_m=init.Constant(0),
+                        nonlinearity=nonlinearities.sigmoid,                
+                        #BatchNormLayer params
+                        epsilon=0.01, alpha=0.5, **kwargs):
+
+        super(PGPBNLayer, self).__init__(incoming, 
+                                        num_factors, num_maps, 
+                                        W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, 
+                                        nonlinearity=nonlinearity, **kwargs)
+
+        self.epsilon = epsilon; self.alpha = alpha
+
+        shape = (1, self.num_factors)
+        self.mean  = self.add_param(init.Constant(0), shape, 'mean',
+                                   trainable=False, regularizable=False)
+        self.std   = self.add_param(init.Constant(1), shape, 'std',
+                                   trainable=False, regularizable=False)
+        self.beta  = self.add_param(init.Constant(0), shape, 'beta',
+                                   trainable=True, regularizable=True)
+        self.gamma = self.add_param(init.Constant(1), shape, 'gamma',
+                                   trainable=True, regularizable=False)
+        del self.l_m
+        self.l_m  = FactorGateBNLayer([self.l_x_i, self.l_y_i], mean=None, std=None, beta=None, gamma=None, num_factors=self.num_factors, num_maps=self.num_maps, W_x=W_x, W_y=W_y, W_m=W_m, b_m=b_m, nonlinearity=self.nonlinearity, name='PGPBNLayer l_m')
+
+    def get_output_for(self, input, deterministic=False, **kwargs):
+        # Caculate normalizing params
+        if deterministic:
+            mean = self.mean
+            std = self.std
+        else:
+            axes = (0, 1)
+            mean = input.mean(axes).reshape((1, self.num_factors)) 
+            std  = input.std (axes).reshape((1, self.num_factors))
+            # Update the stored moving window mean and std
+            running_mean = theano.clone(self.mean, share_inputs=False)
+            running_std  = theano.clone(self.std, share_inputs=False)
+            running_mean.default_update = ((1-self.alpha)*running_mean + self.alpha*mean)
+            running_std.default_update  = ((1-self.alpha)*running_std  + self.alpha*std)
+            mean += 0*running_mean
+            std  += 0*running_std
+        std += self.epsilon
+        axes = (0,)
+        mean = T.addbroadcast(mean, *axes)
+        std  = T.addbroadcast(std , *axes)
+        self.gamma= T.addbroadcast(self.gamma,*axes)
+        self.beta = T.addbroadcast(self.beta, *axes)
+        
+        # Setting the Normalizing params in l_m
+        self.l_m.mean=mean; self.l_m.std=std; 
+        self.l_m.beta=self.beta; self.l_m.gamma=self.gamma
+            
+        # (n_batch, n_time_steps, n_features)---->(n_time_steps, n_batch, n_features)
+        input = input.dimshuffle(1, 0, 2)
+
+        # Create single recurrent computation step function
+        def step(input_x_n,input_y_n, *args):
+            # computer maps units
+            maps = helper.get_output(self.l_m, {self.l_x_i:input_x_n, self.l_y_i:input_y_n})
+
+            # Clip gradients
+            if self.grad_clipping is not False:
+                maps = theano.gradient.grad_clip(
+                    maps, -self.grad_clipping, self.grad_clipping)
+
+            return maps
+
+        # pass the shared tensor to step as the requestion of strict flag in scan
+        non_seqs = helper.get_all_params(self.l_m)+[self.mean,self.std,self.gamma,self.beta]
+      
+        # Scan op iterates over first dimension of input, the using of taps mk scan looks forward one timestep
+        maps_out = theano.scan(
+            fn=step,
+            sequences=dict(input=input, taps=[-1,-0]),
+            non_sequences=non_seqs,
+            strict=True)[0]
+
+        # dimshuffle back to (n_batch, n_time_steps, n_features))
+        maps_out = maps_out.dimshuffle(1, 0, 2)
+
+        return maps_out
+
